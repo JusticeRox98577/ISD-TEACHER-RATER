@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Rate a Teacher</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="container">
+    <h1>Rate a teacher</h1>
+    <nav class="nav">
+      <a href="/">Home</a>
+      <a href="/rate.html" class="active">Rate</a>
+      <a href="/rules.html">Rules</a>
+    </nav>
+  </header>
+
+  <main class="container">
+    <section class="card">
+      <h2>Submit a review</h2>
+
+      <label class="label">School</label>
+      <select id="school" class="input">
+        <option value="Skyline High School">Skyline High School</option>
+        <option value="Eastlake High School">Eastlake High School</option>
+        <option value="Eastside Catholic (optional)">Eastside Catholic (optional)</option>
+        <option value="Other">Other</option>
+      </select>
+
+      <label class="label">Teacher</label>
+      <input id="teacherSearch" class="input" placeholder="Search teacher name..." />
+      <div id="teacherPick" class="list"></div>
+
+      <div id="picked" class="picked hidden"></div>
+
+      <div class="grid2">
+        <div>
+          <label class="label">Overall (1–5)</label>
+          <select id="overall" class="input">
+            <option>5</option><option>4</option><option>3</option><option>2</option><option>1</option>
+          </select>
+        </div>
+        <div>
+          <label class="label">Difficulty (1–5)</label>
+          <select id="difficulty" class="input">
+            <option>5</option><option>4</option><option>3</option><option>2</option><option>1</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="grid2">
+        <div>
+          <label class="label">Clarity (1–5)</label>
+          <select id="clarity" class="input">
+            <option>5</option><option>4</option><option>3</option><option>2</option><option>1</option>
+          </select>
+        </div>
+        <div>
+          <label class="label">Would take again?</label>
+          <select id="wouldTakeAgain" class="input">
+            <option value="1">Yes</option>
+            <option value="0">No</option>
+          </select>
+        </div>
+      </div>
+
+      <label class="label">Comment (optional)</label>
+      <textarea id="comment" class="input" rows="5" maxlength="600"
+        placeholder="Keep it factual and respectful. No personal info."></textarea>
+
+      <div class="note">
+        Reviews are held for moderation before appearing publicly.
+      </div>
+
+      <button id="submit" class="btn">Submit review</button>
+      <p id="msg" class="msg"></p>
+    </section>
+  </main>
+
+  <script src="/rate.js"></script>
+</body>
+</html>
