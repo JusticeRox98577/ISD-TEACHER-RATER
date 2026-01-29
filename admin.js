@@ -13,7 +13,9 @@ async function api(path, body) {
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
 
   if (!res.ok) {
-    throw new Error(data?.error || `HTTP ${res.status}: ${text}`);
+    // Worker sometimes returns plain text (like "Unauthorized")
+    // so prefer JSON error, then raw text
+    throw new Error(data?.error || (typeof data?.raw === "string" ? data.raw : `HTTP ${res.status}`));
   }
   return data;
 }
@@ -58,6 +60,7 @@ async function loadPending() {
   `).join("");
 }
 
+// Handle approve/reject clicks
 document.addEventListener("click", async (e) => {
   const btn = e.target.closest("button[data-act]");
   if (!btn) return;
@@ -67,7 +70,8 @@ document.addEventListener("click", async (e) => {
   const act = btn.dataset.act;
 
   try {
-    await api("/api/admin/moderate", { token, id, action: act });
+    const endpoint = act === "approve" ? "/api/admin/approve" : "/api/admin/reject";
+    await api(endpoint, { token, id });
     await loadPending();
   } catch (err) {
     $("msg").textContent = "Error: " + err.message;
@@ -75,8 +79,29 @@ document.addEventListener("click", async (e) => {
 });
 
 document.addEventListener("DOMContentLoaded", () => {
+  // Load pending reviews
   $("load")?.addEventListener("click", async () => {
-    try { await loadPending(); }
-    catch (err) { $("msg").textContent = "Error: " + err.message; }
+    try {
+      await loadPending();
+    } catch (err) {
+      $("msg").textContent = "Error: " + err.message;
+    }
+  });
+
+  // Manual scrape button
+  $("scrape")?.addEventListener("click", async () => {
+    const msg = $("msg");
+    try {
+      msg.textContent = "Running scrape…";
+      const token = $("token").value;
+
+      const result = await api("/api/admin/scrape", { token });
+
+      msg.textContent =
+        `Scrape done ✅ Teachers upserted: ${result.upserted ?? "?"} ` +
+        `(found: ${result.skyline_count_found ?? "?"})`;
+    } catch (err) {
+      msg.textContent = "Error: " + err.message;
+    }
   });
 });
