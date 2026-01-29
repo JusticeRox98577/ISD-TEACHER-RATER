@@ -63,22 +63,19 @@ function requireAdminToken(env, token) {
 }
 
 // -------------------- scraping --------------------
-// Defensive: accept only realistic people names
+
+// Defensive: accept only realistic person names
 function looksLikePersonName(fullName) {
   const name = normalizeName(fullName);
   if (!name) return false;
 
-  // basic length checks
   if (name.length < 5 || name.length > 40) return false;
-
-  // allow letters/spaces/apostrophe/hyphen/period only
   if (!/^[A-Za-z .'-]+$/.test(name)) return false;
 
-  // reject many-word junk
   const parts = name.split(" ").filter(Boolean);
   if (parts.length < 2 || parts.length > 3) return false;
 
-  // reject common page words
+  // reject common non-name words that often appear in directories
   const bad = [
     "Skyline", "High", "School", "Staff", "Directory", "Search",
     "Phone", "Email", "Locations", "Titles", "Home",
@@ -89,59 +86,111 @@ function looksLikePersonName(fullName) {
     if (lower.includes(w.toLowerCase())) return false;
   }
 
-  // reject ALL CAPS sequences (often headings)
   if (/[A-Z]{4,}/.test(name)) return false;
-
   return true;
 }
 
-/**
- * Extract names from the staff directory HTML using HTMLRewriter
- * so we only capture the actual name elements inside each staff card.
- *
- * We try multiple selectors because the exact markup can change:
- * - .fsConstituentItem h3
- * - .fsConstituentItem .fsFullName
- * - .fsConstituentItem .fsConstituentName
- */
-async function scrapeSkylineStaffHTML() {
-  const url = "https://skyline.isd411.org/staff";
+// Build the "directory results" URL that the site uses.
+// This is based on the URL you found in DevTools.
+// We keep last name blank so it returns ALL staff, not just "a".
+function buildSkylineDirectoryUrl() {
+  const base = new URL("https://skyline.isd411.org/staff");
+  base.searchParams.set("utf8", "✓");
+  base.searchParams.set("const_search_group_ids", "289");
+  base.searchParams.set("const_search_role_ids", "1");
+  base.searchParams.set("const_search_keyword", "");
+  base.searchParams.set("const_search_first_name", "");
+  base.searchParams.set("const_search_last_name", "");
+  return base.toString();
+}
 
-  const res = await fetch(url, {
+// Scrape ONE directory page: extract names and pagination links.
+async function scrapeOneDirectoryPage(pageUrl) {
+  const res = await fetch(pageUrl, {
     headers: {
-      "User-Agent": "Mozilla/5.0 (compatible; TeacherRaterBot/2.0)",
+      "User-Agent": "Mozilla/5.0 (compatible; TeacherRaterBot/3.0)",
       "Accept": "text/html,application/xhtml+xml",
     },
   });
 
-  if (!res.ok) throw new Error(`Skyline fetch failed (${res.status})`);
+  if (!res.ok) throw new Error(`Directory fetch failed (${res.status})`);
 
   const names = new Set();
-  let currentText = "";
+  const pageLinks = new Set();
 
-  // Handler that collects text of a matched element
+  // Collect name text from likely name elements inside each card
+  let nameBuf = "";
   class NameTextHandler {
-    text(t) {
-      currentText += t.text;
-    }
+    text(t) { nameBuf += t.text; }
     end() {
-      const candidate = normalizeName(currentText);
-      currentText = "";
-      if (looksLikePersonName(candidate)) {
-        names.add(candidate);
+      const candidate = normalizeName(nameBuf);
+      nameBuf = "";
+      if (looksLikePersonName(candidate)) names.add(candidate);
+    }
+  }
+
+  // Collect pagination hrefs (page 1, page 2, etc)
+  class PaginationLinkHandler {
+    element(el) {
+      const href = el.getAttribute("href");
+      if (!href) return;
+
+      // only keep links that go to /staff with search params
+      // (avoid nav/header links)
+      if (href.includes("/staff") && href.includes("const_search_group_ids")) {
+        pageLinks.add(href);
       }
     }
   }
 
   const rewriter = new HTMLRewriter()
+    // Name selectors: Finalsite directories commonly use one of these
     .on(".fsConstituentItem h3", new NameTextHandler())
+    .on(".fsConstituentItem .fsConstituentName", new NameTextHandler())
     .on(".fsConstituentItem .fsFullName", new NameTextHandler())
-    .on(".fsConstituentItem .fsConstituentName", new NameTextHandler());
 
-  // Consume rewritten stream so handlers run
+    // Pagination links often live in some pagination container; we’ll be broad:
+    .on("a", new PaginationLinkHandler());
+
+  // Consume the transformed response so handlers run
   await rewriter.transform(res).text();
 
-  return { source_url: url, names: [...names] };
+  // Normalize pagination links to absolute URLs
+  const absLinks = [...pageLinks].map((href) => new URL(href, pageUrl).toString());
+
+  return { names: [...names], pageUrls: absLinks };
+}
+
+// Scrape all pages of the directory results
+async function scrapeSkylineStaffDirectory() {
+  const startUrl = buildSkylineDirectoryUrl();
+
+  const seenPages = new Set();
+  const toVisit = [startUrl];
+
+  const allNames = new Set();
+  const maxPages = 10; // safety cap (should be 2 for 179 staff)
+
+  while (toVisit.length > 0 && seenPages.size < maxPages) {
+    const url = toVisit.shift();
+    if (!url || seenPages.has(url)) continue;
+    seenPages.add(url);
+
+    const { names, pageUrls } = await scrapeOneDirectoryPage(url);
+
+    for (const n of names) allNames.add(n);
+
+    // enqueue any new /staff pagination URLs
+    for (const p of pageUrls) {
+      if (!seenPages.has(p)) toVisit.push(p);
+    }
+  }
+
+  return {
+    source_url: startUrl,
+    names: [...allNames],
+    pages_visited: seenPages.size,
+  };
 }
 
 // -------------------- DB writes --------------------
@@ -158,7 +207,7 @@ async function upsertTeacher(env, { name, school, source_url }) {
 }
 
 async function runScrapeAll(env) {
-  const skyline = await scrapeSkylineStaffHTML();
+  const skyline = await scrapeSkylineStaffDirectory();
   const school = "Skyline High School";
 
   let upserted = 0;
@@ -171,8 +220,9 @@ async function runScrapeAll(env) {
 
   return {
     ok: true,
-    skyline_count_found: skyline.names.length,
+    found: skyline.names.length,
     upserted,
+    pages_visited: skyline.pages_visited,
     school,
     source_url: skyline.source_url,
   };
@@ -225,29 +275,6 @@ async function setReviewStatus(env, reviewId, status) {
     0;
 
   return { ok: true, updated: changes };
-}
-
-// "Top rated" endpoint helper
-async function getTopTeachers(env, limit = 10) {
-  const lim = clampInt(limit, 1, 50) ?? 10;
-
-  const { results } = await env.DB.prepare(`
-    SELECT
-      t.id,
-      t.name,
-      t.school,
-      COUNT(r.id) AS review_count,
-      ROUND(AVG(r.overall), 2) AS avg_overall
-    FROM teachers t
-    JOIN reviews r ON r.teacher_id = t.id
-    WHERE r.status = 'approved'
-    GROUP BY t.id, t.name, t.school
-    HAVING COUNT(r.id) >= 1
-    ORDER BY avg_overall DESC, review_count DESC, t.name ASC
-    LIMIT ?
-  `).bind(lim).all();
-
-  return results || [];
 }
 
 // -------------------- Worker entrypoints --------------------
@@ -367,13 +394,6 @@ export default {
       ).run();
 
       return json({ ok: true, status: "pending" }, 201);
-    }
-
-    // Top rated teachers (for homepage “Top Rated”)
-    if (url.pathname === "/api/top" && request.method === "GET") {
-      const limit = url.searchParams.get("limit") ?? "10";
-      const rows = await getTopTeachers(env, limit);
-      return json({ ok: true, rows });
     }
 
     // ---------------- Admin APIs ----------------
