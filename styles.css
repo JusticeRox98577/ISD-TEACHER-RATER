@@ -1,30 +1,176 @@
-:root { --bg:#0b0c10; --card:#14161d; --text:#e9eef5; --muted:#aab4c0; --line:#2a2f3a; }
-*{ box-sizing:border-box; }
-body{ margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-  background:var(--bg); color:var(--text); }
-.container{ max-width: 900px; margin: 0 auto; padding: 18px; }
-h1{ margin: 0 0 6px; font-size: 28px; }
-.sub{ margin:0 0 12px; color:var(--muted); }
-.nav{ display:flex; gap:12px; flex-wrap:wrap; margin:10px 0 0; }
-.nav a{ color:var(--text); text-decoration:none; padding:8px 10px; border:1px solid var(--line); border-radius:10px; }
-.nav a.active{ background:#1c2130; }
-.card{ background:var(--card); border:1px solid var(--line); border-radius:16px; padding:16px; margin: 14px 0; }
-.input{ width:100%; padding:10px 12px; border-radius:12px; border:1px solid var(--line);
-  background:#0f1118; color:var(--text); margin: 6px 0 12px; }
-.label{ display:block; color:var(--muted); font-size: 13px; margin-top: 8px; }
-.btn{ display:inline-block; padding:10px 14px; border-radius:12px; border:1px solid var(--line);
-  background:#1c2130; color:var(--text); cursor:pointer; text-decoration:none; }
-.btn:hover{ filter: brightness(1.07); }
-.list{ display:flex; flex-direction:column; gap:10px; margin-top:10px; }
-.item{ padding:12px; border:1px solid var(--line); border-radius:14px; background:#10131a; }
-.item a{ color:var(--text); text-decoration:none; }
-.hint{ color:var(--muted); font-size: 13px; margin-top: 10px; }
-.footer{ color:var(--muted); }
-.grid2{ display:grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-@media (max-width:640px){ .grid2{ grid-template-columns: 1fr; } }
-.picked{ padding:10px 12px; border:1px solid var(--line); border-radius:12px; background:#0f1118; margin-bottom: 10px; }
-.hidden{ display:none; }
-.msg{ color:var(--muted); }
-.note{ color:var(--muted); font-size: 13px; margin: 8px 0 12px; }
-.summary{ color:var(--text); }
-.badge{ display:inline-block; padding:4px 8px; border:1px solid var(--line); border-radius:999px; color:var(--muted); margin-right:6px; font-size: 12px;}
+/* styles.css */
+
+:root {
+  --bg: #f7f7fb;
+  --card: #ffffff;
+  --text: #111827;
+  --muted: #6b7280;
+  --border: #e5e7eb;
+  --btn: #111827;
+  --btnText: #ffffff;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.container {
+  width: min(900px, 92vw);
+  margin: 0 auto;
+  padding: 16px;
+}
+
+header h1 {
+  margin: 0 0 8px;
+  font-size: 28px;
+}
+
+.nav {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.nav a {
+  color: var(--text);
+  text-decoration: none;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: transparent;
+  border: 1px solid transparent;
+}
+
+.nav a.active {
+  border-color: var(--border);
+  background: #fff;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 16px;
+  box-shadow: 0 8px 18px rgba(0,0,0,0.04);
+}
+
+.label {
+  display: block;
+  font-weight: 600;
+  margin: 12px 0 6px;
+}
+
+.input {
+  width: 100%;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: #fff;
+  font-size: 16px;
+  outline: none;
+}
+
+.input:focus {
+  border-color: #c7d2fe;
+  box-shadow: 0 0 0 3px rgba(99,102,241,0.15);
+}
+
+.grid2 {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 1fr;
+}
+
+@media (min-width: 680px) {
+  .grid2 {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.note {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: #f3f4f6;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.btn {
+  margin-top: 14px;
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: none;
+  background: var(--btn);
+  color: var(--btnText);
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.btn:active {
+  transform: translateY(1px);
+}
+
+.msg {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+/* IMPORTANT: if hidden doesn't use display:none, it can block taps on iPhone */
+.hidden { display: none !important; }
+
+.dim { color: var(--muted); }
+.muted { color: var(--muted); }
+
+/* Teacher search dropdown */
+.list {
+  margin-top: 6px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+  max-height: 260px;
+  overflow-y: auto;
+
+  /* Prevent it from covering the whole screen */
+  position: relative;
+  z-index: 10;
+}
+
+/* Each result row is a button */
+.list-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 12px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  cursor: pointer;
+  font-size: 16px;
+}
+
+.list-item:last-child {
+  border-bottom: 0;
+}
+
+.list-item:active {
+  background: #f3f4f6;
+}
+
+/* Selected teacher display */
+.picked {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: #fafafa;
+  font-size: 14px;
+}
