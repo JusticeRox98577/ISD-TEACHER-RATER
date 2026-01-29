@@ -1,3 +1,4 @@
-name = "isd-teacher-rater-api"
-main = "src/index.js"
+name = "teacherapi"
+main = "index.js"
 compatibility_date = "2026-01-29"
+workers_dev = true
