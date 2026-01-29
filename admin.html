@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Admin – Moderate Reviews</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="container">
+    <h1>Admin moderation</h1>
+    <nav class="nav">
+      <a href="/">Home</a>
+      <a href="/rate.html">Rate</a>
+      <a href="/admin.html" class="active">Admin</a>
+    </nav>
+  </header>
+
+  <main class="container">
+    <section class="card">
+      <label class="label">Admin token</label>
+      <input id="token" class="input" placeholder="Paste admin token here" />
+
+      <button id="load" class="btn" style="margin-top:12px;">Load pending reviews</button>
+      <p id="msg" class="msg"></p>
+    </section>
+
+    <section class="card" style="margin-top:14px;">
+      <h2>Pending</h2>
+      <div id="list"></div>
+    </section>
+  </main>
+
+  <script src="/admin.js?v=1"></script>
+</body>
+</html>
