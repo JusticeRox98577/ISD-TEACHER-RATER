@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>ISD Teacher Ratings (Sammamish)</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="container">
+    <h1>ISD Teacher Ratings (Sammamish)</h1>
+    <p class="sub">
+      Student-written reviews. Not affiliated with Issaquah School District.
+    </p>
+    <nav class="nav">
+      <a href="/">Home</a>
+      <a href="/rate.html">Rate a teacher</a>
+      <a href="/rules.html">Rules</a>
+    </nav>
+  </header>
+
+  <main class="container">
+    <section class="card">
+      <h2>Find a teacher</h2>
+      <input id="q" class="input" placeholder="Search teacher name (e.g., Smith)" />
+      <div id="results" class="list"></div>
+      <p class="hint">
+        Don’t see a teacher? Ask the site owner to add them (to prevent fake entries).
+      </p>
+    </section>
+
+    <section class="card">
+      <h2>Top rated (recent)</h2>
+      <div id="top" class="list"></div>
+    </section>
+  </main>
+
+  <footer class="container footer">
+    <small>© <span id="year"></span> ISD Teacher Ratings</small>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>
