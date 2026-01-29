@@ -1,36 +1,47 @@
-// index.js (Cloudflare Worker + D1)
-// Supports:
-// - Public API: /api/health, /api/teachers, /api/teacher, /api/reviews (GET/POST)
-// - Admin moderation: /api/admin/pending, /api/admin/approve, /api/admin/reject
-// - Manual scrape: /api/admin/scrape
-// - Auto scrape (Cron): scheduled()
+// src/index.js — Cloudflare Worker (module syntax)
+// Requires bindings:
+// - env.DB (D1 Database)
+// - env.ADMIN_TOKEN (string)
+// Optional: cron trigger calls scheduled()
 
-/* ----------------------------- Small helpers ----------------------------- */
+// -------------------- Response helpers (CORS + JSON) --------------------
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
 
 function json(data, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
+      ...CORS_HEADERS,
       ...extraHeaders,
     },
   });
 }
 
 function text(msg, status = 200, extraHeaders = {}) {
-  return new Response(msg, {
+  return new Response(String(msg), {
     status,
     headers: {
       "Content-Type": "text/plain; charset=utf-8",
-      "Access-Control-Allow-Origin": "*",
+      ...CORS_HEADERS,
       ...extraHeaders,
     },
   });
 }
 
+async function readJson(request) {
+  try {
+    return await request.json();
+  } catch {
+    return null;
+  }
+}
+
+// -------------------- Input helpers --------------------
 function clampInt(n, min, max) {
   const x = Number.parseInt(n, 10);
   if (Number.isNaN(x)) return null;
@@ -47,30 +58,27 @@ function normalizeName(s) {
 }
 
 function requireAdminToken(env, token) {
-  // Set ADMIN_TOKEN in Cloudflare Worker -> Settings -> Variables
   const expected = String(env.ADMIN_TOKEN || "").trim();
-  if (!expected) return false; // fail closed if not set
+  if (!expected) return false;
   return String(token || "").trim() === expected;
 }
 
-/* ------------------------------- Scraping ------------------------------- */
-/**
- * Skyline staff page may be server-rendered or JS-rendered.
- * This HTML scrape is generic; if it returns junk/0, we’ll switch to the JSON endpoint Skyline uses.
- */
+// -------------------- Scraper --------------------
 async function scrapeSkylineStaffHTML() {
   const url = "https://skyline.isd411.org/staff";
   const res = await fetch(url, {
     headers: {
+      // Workers runtime header is fine — not for browsers
       "User-Agent": "Mozilla/5.0 (compatible; TeacherRaterBot/1.0)",
       "Accept": "text/html,application/xhtml+xml",
     },
   });
+
   if (!res.ok) throw new Error(`Skyline fetch failed (${res.status})`);
 
   const html = await res.text();
 
-  // Strip scripts/styles/tags -> plain-ish text
+  // Strip scripts/styles, then tags, then squeeze whitespace
   const textOnly = html
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
@@ -80,12 +88,12 @@ async function scrapeSkylineStaffHTML() {
 
   const names = new Set();
 
-  // Pattern A: "Last, First"
+  // "LAST, First" format
   for (const m of textOnly.matchAll(/\b([A-Z][a-zA-Z'’-]+),\s+([A-Z][a-zA-Z'’-]+)\b/g)) {
     names.add(normalizeName(`${m[2]} ${m[1]}`));
   }
 
-  // Pattern B: "First Last" (guarded a bit)
+  // "First Last" format
   for (const m of textOnly.matchAll(/\b([A-Z][a-zA-Z'’-]{2,})\s+([A-Z][a-zA-Z'’-]{2,})\b/g)) {
     const full = normalizeName(`${m[1]} ${m[2]}`);
     if (full.length > 40) continue;
@@ -99,16 +107,13 @@ async function scrapeSkylineStaffHTML() {
 async function upsertTeacher(env, { name, school, source_url }) {
   const now = new Date().toISOString();
 
-  // Requires unique index on (name, school). See SQL in my earlier message.
   await env.DB.prepare(`
     INSERT INTO teachers (name, school, source_url, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?)
     ON CONFLICT(name, school) DO UPDATE SET
       source_url=excluded.source_url,
       updated_at=excluded.updated_at
-  `)
-    .bind(name, school, source_url || "", now, now)
-    .run();
+  `).bind(name, school, source_url || "", now, now).run();
 }
 
 async function runScrapeAll(env) {
@@ -119,7 +124,7 @@ async function runScrapeAll(env) {
   for (const n of skyline.names) {
     if (!n) continue;
     const parts = n.split(" ").filter(Boolean);
-    if (parts.length < 2) continue; // skip single tokens
+    if (parts.length < 2) continue;
     await upsertTeacher(env, { name: n, school, source_url: skyline.source_url });
     upserted++;
   }
@@ -133,8 +138,7 @@ async function runScrapeAll(env) {
   };
 }
 
-/* ------------------------------ Admin: D1 ------------------------------ */
-
+// -------------------- Reviews + Moderation --------------------
 async function getPendingReviews(env, limit = 50) {
   const lim = clampInt(limit, 1, 200) ?? 50;
 
@@ -156,9 +160,7 @@ async function getPendingReviews(env, limit = 50) {
     WHERE r.status='pending'
     ORDER BY r.created_at DESC
     LIMIT ?
-  `)
-    .bind(lim)
-    .all();
+  `).bind(lim).all();
 
   return results || [];
 }
@@ -175,41 +177,31 @@ async function setReviewStatus(env, reviewId, status) {
     UPDATE reviews
     SET status = ?
     WHERE id = ? AND status='pending'
-  `)
-    .bind(status, id)
-    .run();
+  `).bind(status, id).run();
 
-  // D1 returns meta changes in different shapes; be defensive
-  const changed =
-    out?.meta?.changes ?? out?.changes ?? out?.success ? 1 : 0;
+  // D1 returns meta in different shapes depending on tooling; handle safely
+  const changes =
+    (out && out.meta && typeof out.meta.changes === "number" ? out.meta.changes : null) ??
+    (typeof out.changes === "number" ? out.changes : null) ??
+    0;
 
-  return { ok: true, updated: changed };
+  return { ok: true, updated: changes };
 }
 
-/* ------------------------------- The Worker ------------------------------ */
-
+// -------------------- Main Worker --------------------
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // CORS preflight
+    // Handle preflight for Safari/phones/etc.
     if (request.method === "OPTIONS") {
-      return new Response("", {
-        status: 204,
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type",
-        },
-      });
+      return new Response("", { status: 204, headers: { ...CORS_HEADERS } });
     }
 
-    // Health
+    // --- Basic ---
     if (url.pathname === "/api/health") return text("OK");
 
-    /* --------------------------- Public endpoints -------------------------- */
-
-    // List/search teachers
+    // --- Teachers search ---
     if (url.pathname === "/api/teachers" && request.method === "GET") {
       const q = cleanStr(url.searchParams.get("q") || "", 80);
       const like = `%${q}%`;
@@ -233,16 +225,14 @@ export default {
       return json(results || []);
     }
 
-    // Teacher summary + stats
+    // --- Teacher stats ---
     if (url.pathname === "/api/teacher" && request.method === "GET") {
       const id = url.searchParams.get("id");
       if (!id) return text("Missing id", 400);
 
       const teacher = await env.DB.prepare(
         `SELECT id, name, school FROM teachers WHERE id = ?`
-      )
-        .bind(id)
-        .first();
+      ).bind(id).first();
 
       if (!teacher) return text("Not found", 404);
 
@@ -255,14 +245,12 @@ export default {
           AVG(would_take_again) * 100.0 AS would_take_again_pct
         FROM reviews
         WHERE teacher_id = ? AND status='approved'
-      `)
-        .bind(id)
-        .first();
+      `).bind(id).first();
 
       return json({ ...teacher, ...stats });
     }
 
-    // Get approved reviews for a teacher
+    // --- Approved reviews list ---
     if (url.pathname === "/api/reviews" && request.method === "GET") {
       const teacherId = url.searchParams.get("teacher_id");
       if (!teacherId) return text("Missing teacher_id", 400);
@@ -275,22 +263,14 @@ export default {
         WHERE teacher_id = ? AND status='approved'
         ORDER BY created_at DESC
         LIMIT 50
-      `)
-        .bind(teacherId)
-        .all();
+      `).bind(teacherId).all();
 
       return json(results || []);
     }
 
-    // Submit a review (creates pending)
+    // --- Submit review (pending) ---
     if (url.pathname === "/api/reviews" && request.method === "POST") {
-      let body;
-      try {
-        body = await request.json();
-      } catch {
-        return text("Invalid JSON", 400);
-      }
-
+      const body = (await readJson(request)) || {};
       const teacher_id = String(body.teacher_id ?? "").trim();
       const school = cleanStr(body.school ?? "", 120);
       const overall = clampInt(body.overall, 1, 5);
@@ -306,64 +286,76 @@ export default {
       }
 
       const exists = await env.DB.prepare(`SELECT 1 FROM teachers WHERE id = ?`)
-        .bind(teacher_id)
-        .first();
+        .bind(teacher_id).first();
+
       if (!exists) return text("Teacher not found", 404);
 
       const now = new Date().toISOString();
+
       await env.DB.prepare(`
         INSERT INTO reviews
           (teacher_id, school, overall, difficulty, clarity, would_take_again, comment, status, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
-      `)
-        .bind(
-          teacher_id,
-          school,
-          overall,
-          difficulty,
-          clarity,
-          would_take_again,
-          comment,
-          now
-        )
-        .run();
+      `).bind(
+        teacher_id,
+        school,
+        overall,
+        difficulty,
+        clarity,
+        would_take_again,
+        comment,
+        now
+      ).run();
 
       return json({ ok: true, status: "pending" }, 201);
     }
 
-    /* ---------------------------- Admin endpoints -------------------------- */
+    // ---------------- Admin endpoints ----------------
 
-    // Admin: list pending
+    // Pending list
     if (url.pathname === "/api/admin/pending" && request.method === "POST") {
-      const body = await request.json().catch(() => ({}));
+      const body = (await readJson(request)) || {};
       if (!requireAdminToken(env, body.token)) return text("Unauthorized", 401);
 
-      const limit = body.limit ?? 50;
-      const rows = await getPendingReviews(env, limit);
+      const rows = await getPendingReviews(env, body.limit ?? 50);
       return json({ ok: true, rows });
     }
 
-    // Admin: approve
+    // Approve
     if (url.pathname === "/api/admin/approve" && request.method === "POST") {
-      const body = await request.json().catch(() => ({}));
+      const body = (await readJson(request)) || {};
       if (!requireAdminToken(env, body.token)) return text("Unauthorized", 401);
 
       const out = await setReviewStatus(env, body.id, "approved");
       return json(out, out.ok ? 200 : 400);
     }
 
-    // Admin: reject
+    // Reject
     if (url.pathname === "/api/admin/reject" && request.method === "POST") {
-      const body = await request.json().catch(() => ({}));
+      const body = (await readJson(request)) || {};
       if (!requireAdminToken(env, body.token)) return text("Unauthorized", 401);
 
       const out = await setReviewStatus(env, body.id, "rejected");
       return json(out, out.ok ? 200 : 400);
     }
 
-    // Admin: manual scrape trigger
+    // COMPAT ROUTE: Moderate (so your old admin.js won't 404)
+    // Expects { token, id, action: "approve" | "reject" }
+    if (url.pathname === "/api/admin/moderate" && request.method === "POST") {
+      const body = (await readJson(request)) || {};
+      if (!requireAdminToken(env, body.token)) return text("Unauthorized", 401);
+
+      const action = String(body.action || "").trim();
+      const status = action === "approve" ? "approved" : action === "reject" ? "rejected" : null;
+      if (!status) return json({ ok: false, error: "Invalid action" }, 400);
+
+      const out = await setReviewStatus(env, body.id, status);
+      return json(out, out.ok ? 200 : 400);
+    }
+
+    // Manual scrape trigger
     if (url.pathname === "/api/admin/scrape" && request.method === "POST") {
-      const body = await request.json().catch(() => ({}));
+      const body = (await readJson(request)) || {};
       if (!requireAdminToken(env, body.token)) return text("Unauthorized", 401);
 
       try {
@@ -374,10 +366,11 @@ export default {
       }
     }
 
+    // Fallback
     return text("Not found", 404);
   },
 
-  // Auto scrape (Cron Trigger)
+  // Cron Trigger: auto scrape
   async scheduled(event, env, ctx) {
     ctx.waitUntil(
       (async () => {
