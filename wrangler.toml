@@ -1,4 +1,8 @@
 name = "teacherapi"
 main = "index.js"
 compatibility_date = "2026-01-29"
-workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "isd_ratings"
+database_id = "4e477da9-3042-4ab5-936d-2f4d0bcb72ef"
