@@ -63,8 +63,6 @@ function requireAdminToken(env, token) {
 }
 
 // -------------------- scraping --------------------
-
-// Defensive: accept only realistic person names
 function looksLikePersonName(fullName) {
   const name = normalizeName(fullName);
   if (!name) return false;
@@ -75,7 +73,6 @@ function looksLikePersonName(fullName) {
   const parts = name.split(" ").filter(Boolean);
   if (parts.length < 2 || parts.length > 3) return false;
 
-  // reject common non-name words that often appear in directories
   const bad = [
     "Skyline", "High", "School", "Staff", "Directory", "Search",
     "Phone", "Email", "Locations", "Titles", "Home",
@@ -90,9 +87,6 @@ function looksLikePersonName(fullName) {
   return true;
 }
 
-// Build the "directory results" URL that the site uses.
-// This is based on the URL you found in DevTools.
-// We keep last name blank so it returns ALL staff, not just "a".
 function buildSkylineDirectoryUrl() {
   const base = new URL("https://skyline.isd411.org/staff");
   base.searchParams.set("utf8", "✓");
@@ -104,11 +98,34 @@ function buildSkylineDirectoryUrl() {
   return base.toString();
 }
 
-// Scrape ONE directory page: extract names and pagination links.
+// Extract a name from a staff card's full text.
+// The staff card usually looks like:
+// "Kevin Adamo Titles: Assistant Principal Locations: ... Email: ..."
+// so we take text before "Titles:".
+function extractNameFromCardText(cardText) {
+  const t = normalizeName(cardText);
+  if (!t) return null;
+
+  // Split on known labels that appear after the name
+  const splitPoints = ["Titles:", "Locations:", "Email:", "Phone", "Phone Numbers:"];
+  let cut = t.length;
+
+  for (const sp of splitPoints) {
+    const idx = t.indexOf(sp);
+    if (idx !== -1) cut = Math.min(cut, idx);
+  }
+
+  const maybeName = normalizeName(t.slice(0, cut));
+
+  // Sometimes the card text can start with extra whitespace; enforce person check
+  if (!looksLikePersonName(maybeName)) return null;
+  return maybeName;
+}
+
 async function scrapeOneDirectoryPage(pageUrl) {
   const res = await fetch(pageUrl, {
     headers: {
-      "User-Agent": "Mozilla/5.0 (compatible; TeacherRaterBot/3.0)",
+      "User-Agent": "Mozilla/5.0 (compatible; TeacherRaterBot/4.0)",
       "Accept": "text/html,application/xhtml+xml",
     },
   });
@@ -118,25 +135,31 @@ async function scrapeOneDirectoryPage(pageUrl) {
   const names = new Set();
   const pageLinks = new Set();
 
-  // Collect name text from likely name elements inside each card
-  let nameBuf = "";
-  class NameTextHandler {
-    text(t) { nameBuf += t.text; }
+  // We capture the FULL text inside each .fsConstituentItem
+  // and then parse the name out of it.
+  const cardTextById = new Map(); // key: an incrementing id, value: text
+  let currentCardId = 0;
+
+  class CardHandler {
+    element() {
+      currentCardId++;
+      cardTextById.set(currentCardId, "");
+    }
+    text(t) {
+      const prev = cardTextById.get(currentCardId) || "";
+      cardTextById.set(currentCardId, prev + " " + t.text);
+    }
     end() {
-      const candidate = normalizeName(nameBuf);
-      nameBuf = "";
-      if (looksLikePersonName(candidate)) names.add(candidate);
+      const full = cardTextById.get(currentCardId) || "";
+      const name = extractNameFromCardText(full);
+      if (name) names.add(name);
     }
   }
 
-  // Collect pagination hrefs (page 1, page 2, etc)
   class PaginationLinkHandler {
     element(el) {
       const href = el.getAttribute("href");
       if (!href) return;
-
-      // only keep links that go to /staff with search params
-      // (avoid nav/header links)
       if (href.includes("/staff") && href.includes("const_search_group_ids")) {
         pageLinks.add(href);
       }
@@ -144,24 +167,15 @@ async function scrapeOneDirectoryPage(pageUrl) {
   }
 
   const rewriter = new HTMLRewriter()
-    // Name selectors: Finalsite directories commonly use one of these
-    .on(".fsConstituentItem h3", new NameTextHandler())
-    .on(".fsConstituentItem .fsConstituentName", new NameTextHandler())
-    .on(".fsConstituentItem .fsFullName", new NameTextHandler())
-
-    // Pagination links often live in some pagination container; we’ll be broad:
+    .on(".fsConstituentItem", new CardHandler())
     .on("a", new PaginationLinkHandler());
 
-  // Consume the transformed response so handlers run
   await rewriter.transform(res).text();
 
-  // Normalize pagination links to absolute URLs
   const absLinks = [...pageLinks].map((href) => new URL(href, pageUrl).toString());
-
   return { names: [...names], pageUrls: absLinks };
 }
 
-// Scrape all pages of the directory results
 async function scrapeSkylineStaffDirectory() {
   const startUrl = buildSkylineDirectoryUrl();
 
@@ -169,18 +183,16 @@ async function scrapeSkylineStaffDirectory() {
   const toVisit = [startUrl];
 
   const allNames = new Set();
-  const maxPages = 10; // safety cap (should be 2 for 179 staff)
+  const maxPages = 10; // safety cap
 
   while (toVisit.length > 0 && seenPages.size < maxPages) {
-    const url = toVisit.shift();
-    if (!url || seenPages.has(url)) continue;
-    seenPages.add(url);
+    const u = toVisit.shift();
+    if (!u || seenPages.has(u)) continue;
+    seenPages.add(u);
 
-    const { names, pageUrls } = await scrapeOneDirectoryPage(url);
+    const { names, pageUrls } = await scrapeOneDirectoryPage(u);
 
     for (const n of names) allNames.add(n);
-
-    // enqueue any new /staff pagination URLs
     for (const p of pageUrls) {
       if (!seenPages.has(p)) toVisit.push(p);
     }
@@ -218,9 +230,10 @@ async function runScrapeAll(env) {
     upserted++;
   }
 
+  // IMPORTANT: return the field name your admin.js expects
   return {
     ok: true,
-    found: skyline.names.length,
+    skyline_count_found: skyline.names.length,
     upserted,
     pages_visited: skyline.pages_visited,
     school,
@@ -289,7 +302,6 @@ export default {
     if (url.pathname === "/api/health") return text("OK");
 
     // ---------------- Public APIs ----------------
-
     if (url.pathname === "/api/teachers" && request.method === "GET") {
       const q = cleanStr(url.searchParams.get("q") || "", 80);
       const like = `%${q}%`;
@@ -397,7 +409,6 @@ export default {
     }
 
     // ---------------- Admin APIs ----------------
-
     if (url.pathname === "/api/admin/pending" && request.method === "POST") {
       const body = (await readJson(request)) || {};
       if (!requireAdminToken(env, body.token)) return text("Unauthorized", 401);
