@@ -1,7 +1,7 @@
 // src/index.js — Cloudflare Worker (module syntax)
-// Bindings required:
-// - env.DB (D1 Database binding)
-// - env.ADMIN_TOKEN (string env var)
+// Required bindings:
+// - env.DB (D1 Database)
+// - env.ADMIN_TOKEN (string)
 
 // -------------------- CORS + response helpers --------------------
 const CORS_HEADERS = {
@@ -62,74 +62,84 @@ function requireAdminToken(env, token) {
   return String(token || "").trim() === expected;
 }
 
-// -------------------- scrape helpers --------------------
-
-// Very defensive "does this look like a real person name?"
+// -------------------- scraping --------------------
+// Defensive: accept only realistic people names
 function looksLikePersonName(fullName) {
   const name = normalizeName(fullName);
   if (!name) return false;
 
-  // Reject weird length
+  // basic length checks
   if (name.length < 5 || name.length > 40) return false;
 
-  // Only allow letters, spaces, apostrophes, hyphens, and periods
+  // allow letters/spaces/apostrophe/hyphen/period only
   if (!/^[A-Za-z .'-]+$/.test(name)) return false;
 
+  // reject many-word junk
   const parts = name.split(" ").filter(Boolean);
-
-  // Most staff names are 2–3 parts (First Last, or First Middle Last)
   if (parts.length < 2 || parts.length > 3) return false;
 
-  // Reject common non-name words that sneak in
-  const badWords = [
-    "Skyline", "High", "School", "Staff", "Directory", "Office",
-    "Department", "Counseling", "Center", "Student", "Students",
-    "Teacher", "Teachers", "Principal", "Assistant", "Grade",
-    "District", "Issaquah", "Washington"
+  // reject common page words
+  const bad = [
+    "Skyline", "High", "School", "Staff", "Directory", "Search",
+    "Phone", "Email", "Locations", "Titles", "Home",
+    "Issaquah", "District", "Washington"
   ];
   const lower = name.toLowerCase();
-  for (const w of badWords) {
+  for (const w of bad) {
     if (lower.includes(w.toLowerCase())) return false;
   }
 
-  // Reject ALL CAPS chunks
+  // reject ALL CAPS sequences (often headings)
   if (/[A-Z]{4,}/.test(name)) return false;
 
   return true;
 }
 
-// Scrape Skyline staff page and pull names.
-// IMPORTANT: Only use the "Last, First" pattern — it’s much cleaner.
+/**
+ * Extract names from the staff directory HTML using HTMLRewriter
+ * so we only capture the actual name elements inside each staff card.
+ *
+ * We try multiple selectors because the exact markup can change:
+ * - .fsConstituentItem h3
+ * - .fsConstituentItem .fsFullName
+ * - .fsConstituentItem .fsConstituentName
+ */
 async function scrapeSkylineStaffHTML() {
   const url = "https://skyline.isd411.org/staff";
+
   const res = await fetch(url, {
     headers: {
-      "User-Agent": "Mozilla/5.0 (compatible; TeacherRaterBot/1.0)",
+      "User-Agent": "Mozilla/5.0 (compatible; TeacherRaterBot/2.0)",
       "Accept": "text/html,application/xhtml+xml",
     },
   });
 
   if (!res.ok) throw new Error(`Skyline fetch failed (${res.status})`);
 
-  const html = await res.text();
-
-  // Strip scripts/styles/tags → raw text
-  const textOnly = html
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-
   const names = new Set();
+  let currentText = "";
 
-  // Only "Last, First"
-  for (const m of textOnly.matchAll(/\b([A-Z][a-zA-Z'’-]+),\s+([A-Z][a-zA-Z'’-]+)\b/g)) {
-    const candidate = normalizeName(`${m[2]} ${m[1]}`);
-    if (looksLikePersonName(candidate)) {
-      names.add(candidate);
+  // Handler that collects text of a matched element
+  class NameTextHandler {
+    text(t) {
+      currentText += t.text;
+    }
+    end() {
+      const candidate = normalizeName(currentText);
+      currentText = "";
+      if (looksLikePersonName(candidate)) {
+        names.add(candidate);
+      }
     }
   }
+
+  const rewriter = new HTMLRewriter()
+    .on(".fsConstituentItem h3", new NameTextHandler())
+    .on(".fsConstituentItem .fsFullName", new NameTextHandler())
+    .on(".fsConstituentItem .fsConstituentName", new NameTextHandler());
+
+  // Consume rewritten stream so handlers run
+  await rewriter.transform(res).text();
 
   return { source_url: url, names: [...names] };
 }
@@ -154,9 +164,7 @@ async function runScrapeAll(env) {
   let upserted = 0;
 
   for (const n of skyline.names) {
-    if (!n) continue;
     if (!looksLikePersonName(n)) continue;
-
     await upsertTeacher(env, { name: n, school, source_url: skyline.source_url });
     upserted++;
   }
@@ -211,7 +219,6 @@ async function setReviewStatus(env, reviewId, status) {
     WHERE id = ? AND status='pending'
   `).bind(status, id).run();
 
-  // D1 returns meta in different shapes; handle safely
   const changes =
     (out && out.meta && typeof out.meta.changes === "number" ? out.meta.changes : null) ??
     (typeof out.changes === "number" ? out.changes : null) ??
@@ -220,22 +227,42 @@ async function setReviewStatus(env, reviewId, status) {
   return { ok: true, updated: changes };
 }
 
+// "Top rated" endpoint helper
+async function getTopTeachers(env, limit = 10) {
+  const lim = clampInt(limit, 1, 50) ?? 10;
+
+  const { results } = await env.DB.prepare(`
+    SELECT
+      t.id,
+      t.name,
+      t.school,
+      COUNT(r.id) AS review_count,
+      ROUND(AVG(r.overall), 2) AS avg_overall
+    FROM teachers t
+    JOIN reviews r ON r.teacher_id = t.id
+    WHERE r.status = 'approved'
+    GROUP BY t.id, t.name, t.school
+    HAVING COUNT(r.id) >= 1
+    ORDER BY avg_overall DESC, review_count DESC, t.name ASC
+    LIMIT ?
+  `).bind(lim).all();
+
+  return results || [];
+}
+
 // -------------------- Worker entrypoints --------------------
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // Preflight (important for Safari / mobile)
     if (request.method === "OPTIONS") {
       return new Response("", { status: 204, headers: { ...CORS_HEADERS } });
     }
 
-    // Health check
     if (url.pathname === "/api/health") return text("OK");
 
     // ---------------- Public APIs ----------------
 
-    // Teacher search
     if (url.pathname === "/api/teachers" && request.method === "GET") {
       const q = cleanStr(url.searchParams.get("q") || "", 80);
       const like = `%${q}%`;
@@ -259,7 +286,6 @@ export default {
       return json(results || []);
     }
 
-    // Teacher detail + stats
     if (url.pathname === "/api/teacher" && request.method === "GET") {
       const id = url.searchParams.get("id");
       if (!id) return text("Missing id", 400);
@@ -284,7 +310,6 @@ export default {
       return json({ ...teacher, ...stats });
     }
 
-    // Reviews list (approved)
     if (url.pathname === "/api/reviews" && request.method === "GET") {
       const teacherId = url.searchParams.get("teacher_id");
       if (!teacherId) return text("Missing teacher_id", 400);
@@ -302,7 +327,6 @@ export default {
       return json(results || []);
     }
 
-    // Submit review (pending)
     if (url.pathname === "/api/reviews" && request.method === "POST") {
       const body = (await readJson(request)) || {};
 
@@ -345,6 +369,13 @@ export default {
       return json({ ok: true, status: "pending" }, 201);
     }
 
+    // Top rated teachers (for homepage “Top Rated”)
+    if (url.pathname === "/api/top" && request.method === "GET") {
+      const limit = url.searchParams.get("limit") ?? "10";
+      const rows = await getTopTeachers(env, limit);
+      return json({ ok: true, rows });
+    }
+
     // ---------------- Admin APIs ----------------
 
     if (url.pathname === "/api/admin/pending" && request.method === "POST") {
@@ -371,7 +402,6 @@ export default {
       return json(out, out.ok ? 200 : 400);
     }
 
-    // Manual scrape trigger
     if (url.pathname === "/api/admin/scrape" && request.method === "POST") {
       const body = (await readJson(request)) || {};
       if (!requireAdminToken(env, body.token)) return text("Unauthorized", 401);
@@ -384,11 +414,9 @@ export default {
       }
     }
 
-    // Fallback
     return text("Not found", 404);
   },
 
-  // Cron trigger: auto scrape
   async scheduled(event, env, ctx) {
     ctx.waitUntil(
       (async () => {
