@@ -1,11 +1,17 @@
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { "Content-Type": "application/json; charset=utf-8" },
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Access-Control-Allow-Origin": "*",
+    },
   });
 }
 function text(msg, status = 200) {
-  return new Response(msg, { status, headers: { "Content-Type": "text/plain; charset=utf-8" } });
+  return new Response(msg, {
+    status,
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
+  });
 }
 function clampInt(n, min, max) {
   const x = Number.parseInt(n, 10);
@@ -21,10 +27,22 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
+    // CORS preflight (safe to include)
+    if (request.method === "OPTIONS") {
+      return new Response("", {
+        status: 204,
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type",
+        },
+      });
+    }
+
     // Health
     if (url.pathname === "/api/health") return text("OK");
 
-    // List/search teachers for dropdown
+    // List/search teachers (dropdown uses this)
     if (url.pathname === "/api/teachers" && request.method === "GET") {
       const q = cleanStr(url.searchParams.get("q") || "", 80);
       const like = `%${q}%`;
@@ -48,7 +66,7 @@ export default {
       return json(results);
     }
 
-    // Teacher summary
+    // Get teacher summary
     if (url.pathname === "/api/teacher" && request.method === "GET") {
       const id = url.searchParams.get("id");
       if (!id) return text("Missing id", 400);
@@ -73,7 +91,7 @@ export default {
       return json({ ...teacher, ...stats });
     }
 
-    // Reviews list (approved only)
+    // Get approved reviews for a teacher
     if (url.pathname === "/api/reviews" && request.method === "GET") {
       const teacherId = url.searchParams.get("teacher_id");
       if (!teacherId) return text("Missing teacher_id", 400);
@@ -91,7 +109,7 @@ export default {
       return json(results);
     }
 
-    // Submit review (pending)
+    // Submit a review (creates pending)
     if (url.pathname === "/api/reviews" && request.method === "POST") {
       let body;
       try {
@@ -100,7 +118,7 @@ export default {
         return text("Invalid JSON", 400);
       }
 
-      const teacher_id = cleanStr(body.teacher_id ?? "", 20);
+      const teacher_id = String(body.teacher_id ?? "").trim();
       const school = cleanStr(body.school ?? "", 120);
       const overall = clampInt(body.overall, 1, 5);
       const difficulty = clampInt(body.difficulty, 1, 5);
@@ -112,7 +130,6 @@ export default {
       if (!school) return text("Missing school", 400);
       if (overall === null || difficulty === null || clarity === null) return text("Ratings must be 1-5", 400);
 
-      // Ensure teacher exists
       const exists = await env.DB.prepare(`SELECT 1 FROM teachers WHERE id = ?`).bind(teacher_id).first();
       if (!exists) return text("Teacher not found", 404);
 
