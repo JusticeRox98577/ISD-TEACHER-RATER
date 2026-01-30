@@ -3,7 +3,6 @@
 // - env.DB (D1 Database)
 // - env.ADMIN_TOKEN (string)
 
-// -------------------- CORS + response helpers --------------------
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
@@ -13,34 +12,21 @@ const CORS_HEADERS = {
 function json(data, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: {
-      "Content-Type": "application/json; charset=utf-8",
-      ...CORS_HEADERS,
-      ...extraHeaders,
-    },
+    headers: { "Content-Type": "application/json; charset=utf-8", ...CORS_HEADERS, ...extraHeaders },
   });
 }
 
 function text(msg, status = 200, extraHeaders = {}) {
   return new Response(String(msg), {
     status,
-    headers: {
-      "Content-Type": "text/plain; charset=utf-8",
-      ...CORS_HEADERS,
-      ...extraHeaders,
-    },
+    headers: { "Content-Type": "text/plain; charset=utf-8", ...CORS_HEADERS, ...extraHeaders },
   });
 }
 
 async function readJson(request) {
-  try {
-    return await request.json();
-  } catch {
-    return null;
-  }
+  try { return await request.json(); } catch { return null; }
 }
 
-// -------------------- small utilities --------------------
 function clampInt(n, min, max) {
   const x = Number.parseInt(n, 10);
   if (Number.isNaN(x)) return null;
@@ -52,21 +38,19 @@ function cleanStr(s, maxLen) {
   return s.trim().slice(0, maxLen);
 }
 
-function normalizeName(s) {
-  return String(s || "").replace(/\s+/g, " ").trim();
-}
-
 function requireAdminToken(env, token) {
   const expected = String(env.ADMIN_TOKEN || "").trim();
   if (!expected) return false;
   return String(token || "").trim() === expected;
 }
 
-// -------------------- scraping --------------------
+function normalizeName(s) {
+  return String(s || "").replace(/\s+/g, " ").trim();
+}
+
 function looksLikePersonName(fullName) {
   const name = normalizeName(fullName);
   if (!name) return false;
-
   if (name.length < 5 || name.length > 40) return false;
   if (!/^[A-Za-z .'-]+$/.test(name)) return false;
 
@@ -74,19 +58,16 @@ function looksLikePersonName(fullName) {
   if (parts.length < 2 || parts.length > 3) return false;
 
   const bad = [
-    "Skyline", "High", "School", "Staff", "Directory", "Search",
-    "Phone", "Email", "Locations", "Titles", "Home",
-    "Issaquah", "District", "Washington"
+    "Skyline","High","School","Staff","Directory","Search",
+    "Phone","Email","Locations","Titles","Home","Issaquah","District","Washington"
   ];
   const lower = name.toLowerCase();
-  for (const w of bad) {
-    if (lower.includes(w.toLowerCase())) return false;
-  }
+  for (const w of bad) if (lower.includes(w.toLowerCase())) return false;
 
-  if (/[A-Z]{4,}/.test(name)) return false;
   return true;
 }
 
+// -------------------- URL we know works in your browser --------------------
 function buildSkylineDirectoryUrl() {
   const base = new URL("https://skyline.isd411.org/staff");
   base.searchParams.set("utf8", "✓");
@@ -94,121 +75,65 @@ function buildSkylineDirectoryUrl() {
   base.searchParams.set("const_search_role_ids", "1");
   base.searchParams.set("const_search_keyword", "");
   base.searchParams.set("const_search_first_name", "");
-  base.searchParams.set("const_search_last_name", "");
+  base.searchParams.set("const_search_last_name", "a"); // use 'a' since you proved it shows results
   return base.toString();
 }
 
-// Extract a name from a staff card's full text.
-// The staff card usually looks like:
-// "Kevin Adamo Titles: Assistant Principal Locations: ... Email: ..."
-// so we take text before "Titles:".
-function extractNameFromCardText(cardText) {
-  const t = normalizeName(cardText);
-  if (!t) return null;
-
-  // Split on known labels that appear after the name
-  const splitPoints = ["Titles:", "Locations:", "Email:", "Phone", "Phone Numbers:"];
-  let cut = t.length;
-
-  for (const sp of splitPoints) {
-    const idx = t.indexOf(sp);
-    if (idx !== -1) cut = Math.min(cut, idx);
-  }
-
-  const maybeName = normalizeName(t.slice(0, cut));
-
-  // Sometimes the card text can start with extra whitespace; enforce person check
-  if (!looksLikePersonName(maybeName)) return null;
-  return maybeName;
-}
-
-async function scrapeOneDirectoryPage(pageUrl) {
-  const res = await fetch(pageUrl, {
+// Fetch HTML with more “browser-like” headers
+async function fetchStaffHtml(url) {
+  const res = await fetch(url, {
     headers: {
-      "User-Agent": "Mozilla/5.0 (compatible; TeacherRaterBot/4.0)",
-      "Accept": "text/html,application/xhtml+xml",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.9",
+      "Cache-Control": "no-cache",
+      "Pragma": "no-cache",
     },
   });
-
-  if (!res.ok) throw new Error(`Directory fetch failed (${res.status})`);
-
-  const names = new Set();
-  const pageLinks = new Set();
-
-  // We capture the FULL text inside each .fsConstituentItem
-  // and then parse the name out of it.
-  const cardTextById = new Map(); // key: an incrementing id, value: text
-  let currentCardId = 0;
-
-  class CardHandler {
-    element() {
-      currentCardId++;
-      cardTextById.set(currentCardId, "");
-    }
-    text(t) {
-      const prev = cardTextById.get(currentCardId) || "";
-      cardTextById.set(currentCardId, prev + " " + t.text);
-    }
-    end() {
-      const full = cardTextById.get(currentCardId) || "";
-      const name = extractNameFromCardText(full);
-      if (name) names.add(name);
-    }
-  }
-
-  class PaginationLinkHandler {
-    element(el) {
-      const href = el.getAttribute("href");
-      if (!href) return;
-      if (href.includes("/staff") && href.includes("const_search_group_ids")) {
-        pageLinks.add(href);
-      }
-    }
-  }
-
-  const rewriter = new HTMLRewriter()
-    .on(".fsConstituentItem", new CardHandler())
-    .on("a", new PaginationLinkHandler());
-
-  await rewriter.transform(res).text();
-
-  const absLinks = [...pageLinks].map((href) => new URL(href, pageUrl).toString());
-  return { names: [...names], pageUrls: absLinks };
+  const html = await res.text();
+  return { res, html };
 }
 
-async function scrapeSkylineStaffDirectory() {
-  const startUrl = buildSkylineDirectoryUrl();
+// -------------------- SCRAPE (still here, but likely won't work until we find real data source) --------------------
+async function scrapeSkylineStaffDirectoryBasic() {
+  const pageUrl = buildSkylineDirectoryUrl();
+  const { res, html } = await fetchStaffHtml(pageUrl);
+  if (!res.ok) throw new Error(`Directory fetch failed (${res.status})`);
 
-  const seenPages = new Set();
-  const toVisit = [startUrl];
+  // If the page is truly client-rendered, this will be 0.
+  // We'll attempt a very simple extraction anyway.
+  const names = new Set();
 
-  const allNames = new Set();
-  const maxPages = 10; // safety cap
+  // very rough fallback: look for "Titles:" blocks and take the preceding line chunk
+  // (only works if names exist in HTML)
+  const idx = html.indexOf("Titles:");
+  if (idx !== -1) {
+    // try to find nearby visible text; not perfect
+  }
 
-  while (toVisit.length > 0 && seenPages.size < maxPages) {
-    const u = toVisit.shift();
-    if (!u || seenPages.has(u)) continue;
-    seenPages.add(u);
-
-    const { names, pageUrls } = await scrapeOneDirectoryPage(u);
-
-    for (const n of names) allNames.add(n);
-    for (const p of pageUrls) {
-      if (!seenPages.has(p)) toVisit.push(p);
+  // We also try HTMLRewriter on constituent items if they exist in HTML
+  let currentCard = "";
+  class CardHandler {
+    text(t) { currentCard += " " + t.text; }
+    end() {
+      const t = normalizeName(currentCard);
+      currentCard = "";
+      // take text before Titles:
+      const cut = t.indexOf("Titles:");
+      const candidate = cut !== -1 ? normalizeName(t.slice(0, cut)) : "";
+      if (looksLikePersonName(candidate)) names.add(candidate);
     }
   }
 
-  return {
-    source_url: startUrl,
-    names: [...allNames],
-    pages_visited: seenPages.size,
-  };
+  const rewriter = new HTMLRewriter().on(".fsConstituentItem", new CardHandler());
+  await rewriter.transform(new Response(html, { headers: { "Content-Type": "text/html" } })).text();
+
+  return { source_url: pageUrl, names: [...names] };
 }
 
 // -------------------- DB writes --------------------
 async function upsertTeacher(env, { name, school, source_url }) {
   const now = new Date().toISOString();
-
   await env.DB.prepare(`
     INSERT INTO teachers (name, school, source_url, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?)
@@ -219,23 +144,19 @@ async function upsertTeacher(env, { name, school, source_url }) {
 }
 
 async function runScrapeAll(env) {
-  const skyline = await scrapeSkylineStaffDirectory();
+  const skyline = await scrapeSkylineStaffDirectoryBasic();
   const school = "Skyline High School";
 
   let upserted = 0;
-
   for (const n of skyline.names) {
-    if (!looksLikePersonName(n)) continue;
     await upsertTeacher(env, { name: n, school, source_url: skyline.source_url });
     upserted++;
   }
 
-  // IMPORTANT: return the field name your admin.js expects
   return {
     ok: true,
     skyline_count_found: skyline.names.length,
     upserted,
-    pages_visited: skyline.pages_visited,
     school,
     source_url: skyline.source_url,
   };
@@ -244,7 +165,6 @@ async function runScrapeAll(env) {
 // -------------------- Reviews + moderation --------------------
 async function getPendingReviews(env, limit = 50) {
   const lim = clampInt(limit, 1, 200) ?? 50;
-
   const { results } = await env.DB.prepare(`
     SELECT
       r.id,
@@ -264,17 +184,13 @@ async function getPendingReviews(env, limit = 50) {
     ORDER BY r.created_at DESC
     LIMIT ?
   `).bind(lim).all();
-
   return results || [];
 }
 
 async function setReviewStatus(env, reviewId, status) {
   const id = clampInt(reviewId, 1, 1_000_000_000);
   if (id === null) return { ok: false, error: "Invalid review id" };
-
-  if (status !== "approved" && status !== "rejected") {
-    return { ok: false, error: "Invalid status" };
-  }
+  if (status !== "approved" && status !== "rejected") return { ok: false, error: "Invalid status" };
 
   const out = await env.DB.prepare(`
     UPDATE reviews
@@ -290,22 +206,65 @@ async function setReviewStatus(env, reviewId, status) {
   return { ok: true, updated: changes };
 }
 
+// -------------------- DEBUG HELPERS --------------------
+function snippetAround(haystack, needle, radius = 300) {
+  const idx = haystack.indexOf(needle);
+  if (idx === -1) return null;
+  const start = Math.max(0, idx - radius);
+  const end = Math.min(haystack.length, idx + needle.length + radius);
+  return haystack.slice(start, end);
+}
+
 // -------------------- Worker entrypoints --------------------
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    if (request.method === "OPTIONS") {
-      return new Response("", { status: 204, headers: { ...CORS_HEADERS } });
-    }
+    if (request.method === "OPTIONS") return new Response("", { status: 204, headers: { ...CORS_HEADERS } });
 
     if (url.pathname === "/api/health") return text("OK");
 
-    // ---------------- Public APIs ----------------
+    // ---------------- Admin DEBUG endpoints ----------------
+    if (url.pathname === "/api/admin/debug_staff_fetch" && request.method === "POST") {
+      const body = (await readJson(request)) || {};
+      if (!requireAdminToken(env, body.token)) return text("Unauthorized", 401);
+
+      const staffUrl = buildSkylineDirectoryUrl();
+      const { res, html } = await fetchStaffHtml(staffUrl);
+
+      return json({
+        ok: true,
+        url: staffUrl,
+        status: res.status,
+        content_length: html.length,
+        has_fsConstituentItem: html.includes("fsConstituentItem"),
+        has_fsConstituent: html.includes("fsConstituent"),
+        first_1500: html.slice(0, 1500),
+      });
+    }
+
+    if (url.pathname === "/api/admin/debug_staff_snip" && request.method === "POST") {
+      const body = (await readJson(request)) || {};
+      if (!requireAdminToken(env, body.token)) return text("Unauthorized", 401);
+
+      const staffUrl = buildSkylineDirectoryUrl();
+      const { res, html } = await fetchStaffHtml(staffUrl);
+
+      return json({
+        ok: true,
+        url: staffUrl,
+        status: res.status,
+        content_length: html.length,
+        snip_fsConstituent: snippetAround(html, "fsConstituent", 400),
+        snip_constituent: snippetAround(html.toLowerCase(), "constituent", 400),
+        snip_api: snippetAround(html.toLowerCase(), "api", 400),
+      });
+    }
+
+    // ---------------- Public APIs (same as before) ----------------
     if (url.pathname === "/api/teachers" && request.method === "GET") {
       const q = cleanStr(url.searchParams.get("q") || "", 80);
       const like = `%${q}%`;
-
       const stmt = q
         ? env.DB.prepare(`
             SELECT id, name, school
@@ -329,10 +288,8 @@ export default {
       const id = url.searchParams.get("id");
       if (!id) return text("Missing id", 400);
 
-      const teacher = await env.DB.prepare(
-        `SELECT id, name, school FROM teachers WHERE id = ?`
-      ).bind(id).first();
-
+      const teacher = await env.DB.prepare(`SELECT id, name, school FROM teachers WHERE id = ?`)
+        .bind(id).first();
       if (!teacher) return text("Not found", 404);
 
       const stats = await env.DB.prepare(`
@@ -379,31 +336,17 @@ export default {
 
       if (!teacher_id) return text("Missing teacher_id", 400);
       if (!school) return text("Missing school", 400);
-      if (overall === null || difficulty === null || clarity === null) {
-        return text("Ratings must be 1-5", 400);
-      }
+      if (overall === null || difficulty === null || clarity === null) return text("Ratings must be 1-5", 400);
 
-      const exists = await env.DB.prepare(`SELECT 1 FROM teachers WHERE id = ?`)
-        .bind(teacher_id).first();
-
+      const exists = await env.DB.prepare(`SELECT 1 FROM teachers WHERE id = ?`).bind(teacher_id).first();
       if (!exists) return text("Teacher not found", 404);
 
       const now = new Date().toISOString();
-
       await env.DB.prepare(`
         INSERT INTO reviews
           (teacher_id, school, overall, difficulty, clarity, would_take_again, comment, status, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
-      `).bind(
-        teacher_id,
-        school,
-        overall,
-        difficulty,
-        clarity,
-        would_take_again,
-        comment,
-        now
-      ).run();
+      `).bind(teacher_id, school, overall, difficulty, clarity, would_take_again, comment, now).run();
 
       return json({ ok: true, status: "pending" }, 201);
     }
@@ -412,7 +355,6 @@ export default {
     if (url.pathname === "/api/admin/pending" && request.method === "POST") {
       const body = (await readJson(request)) || {};
       if (!requireAdminToken(env, body.token)) return text("Unauthorized", 401);
-
       const rows = await getPendingReviews(env, body.limit ?? 50);
       return json({ ok: true, rows });
     }
@@ -420,7 +362,6 @@ export default {
     if (url.pathname === "/api/admin/approve" && request.method === "POST") {
       const body = (await readJson(request)) || {};
       if (!requireAdminToken(env, body.token)) return text("Unauthorized", 401);
-
       const out = await setReviewStatus(env, body.id, "approved");
       return json(out, out.ok ? 200 : 400);
     }
@@ -428,7 +369,6 @@ export default {
     if (url.pathname === "/api/admin/reject" && request.method === "POST") {
       const body = (await readJson(request)) || {};
       if (!requireAdminToken(env, body.token)) return text("Unauthorized", 401);
-
       const out = await setReviewStatus(env, body.id, "rejected");
       return json(out, out.ok ? 200 : 400);
     }
@@ -436,7 +376,6 @@ export default {
     if (url.pathname === "/api/admin/scrape" && request.method === "POST") {
       const body = (await readJson(request)) || {};
       if (!requireAdminToken(env, body.token)) return text("Unauthorized", 401);
-
       try {
         const result = await runScrapeAll(env);
         return json(result);
@@ -451,11 +390,8 @@ export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(
       (async () => {
-        try {
-          await runScrapeAll(env);
-        } catch (e) {
-          console.log("Scheduled scrape error:", e?.message || e);
-        }
+        try { await runScrapeAll(env); }
+        catch (e) { console.log("Scheduled scrape error:", e?.message || e); }
       })()
     );
   },
